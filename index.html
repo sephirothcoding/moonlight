@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en" >
+<head>
+  <meta charset="UTF-8">
+  <title>CodePen - Moonlight Sparkles✨ 3D interactive sculptures</title>
+  <link rel="stylesheet" href="./style.css">
+
+</head>
+<body>
+<!-- partial:index.partial.html -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r119/three.min.js"></script> 
+<script src="https://threejs.org/examples/js/utils/BufferGeometryUtils.js"></script>
+<script src="https://threejs.org/examples/js/loaders/GLTFLoader.js"></script>
+<div id="scene-container">
+</div>
+<div class="credits">
+   <a href="https://codepen.io/ScavengerFrontend/" target="_blank"> art & code <br/> by Anna Zenn <br/> Scavenger ↗</a>
+</div>
+<div id="scene-overlay">
+  <p>Loading scene...✨</p></div>
+
+<!-- MATCAP VERTEX SHADER --> 
+<script type="x-shader/x-vertex" id="vs-matcap">
+
+  varying vec2 vN;
+
+	void main() {
+
+		vec3 e = normalize( vec3( modelViewMatrix * vec4( position, 1.0 ) ) );
+		vec3 n = normalize( normalMatrix * normal );
+
+		vec3 r = reflect( e, n );
+		float m = 2. * sqrt( pow( r.x, 2. ) + pow( r.y, 2. ) + pow( r.z + 1., 2. ) );
+		vN = r.xy / m + .5;
+
+		gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1. );
+
+	}
+
+</script>
+
+<!-- MATCAP FRAGMENT SHADER --> 
+<script type="x-shader/x-fragment" id="fs-matcap">
+
+  uniform sampler2D tMatCap;
+
+	varying vec2 vN;
+
+	void main() {
+		
+		vec3 base = texture2D( tMatCap, vN ).rgb;
+		gl_FragColor = vec4( base, 1.0 );
+
+	}
+	
+</script>
+
+<!-- INSTANCED MATCAP VERTEX SHADER --> 
+<script type="x-shader/x-vertex" id="vs-iMatcap">
+  
+  #define PI 3.14159265359
+  varying vec2 vN;
+  
+  attribute vec3 aPosition;
+
+	void main() {
+
+		vec3 e = normalize( vec3( modelViewMatrix * vec4( position, 1.0 ) ) );
+		vec3 n = normalize( normalMatrix * normal );
+
+		vec3 r = reflect( e, n );
+		float m = 2. * sqrt( pow( r.x, 2. ) + pow( r.y, 2. ) + pow( r.z + 1., 2. ) );
+		vN = r.xy / m + .5;
+    
+    vec3 transformed = position.xyz + aPosition.xyz;
+
+		gl_Position = projectionMatrix * modelViewMatrix * vec4( transformed, 1. );
+
+	}
+
+</script>
+
+<!-- INSTANCED MATCAP FRAGMENT SHADER --> 
+<script type="x-shader/x-fragment" id="fs-iMatcap">
+
+  uniform sampler2D tMatCap;
+
+	varying vec2 vN;
+
+	void main() {
+		
+		vec3 base = texture2D( tMatCap, vN ).rgb;
+		gl_FragColor = vec4( base, 1.0 );
+
+	}
+	
+</script>
+
+
+<!-- FAKE GLOW VERTEX SHADER 
+Lee Stemkoski 
+http://stemkoski.blogspot.com/2013/07/shaders-in-threejs-glow-and-halo.html
+--> 
+<script type="x-shader/x-vertex" id="vs-glow">
+uniform vec3 viewVector;
+uniform float c;
+uniform float p;
+varying float intensity;
+void main() 
+{
+    vec3 vNormal = normalize( normalMatrix * normal );
+	vec3 vNormel = normalize( normalMatrix * viewVector );
+	intensity = pow( c - dot(vNormal, vNormel), p );
+	
+    gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+</script>
+
+<!-- FAKE GLOW FRAGMENT SHADER --> 
+<script type="x-shader/x-fragment" id="fs-glow" > 
+uniform vec3 glowColor;
+varying float intensity;
+void main() 
+{
+	vec3 glow = glowColor * intensity;
+    gl_FragColor = vec4( glow, 1.0 );
+}
+</script>
+
+
+
+
+<script>
+  
+/////////////////////////////
+// buffer animation system - Szenia Zadvornykh
+/////////////////////////////
+
+THREE.BAS = {};
+
+THREE.BAS.ShaderChunk = {};
+
+THREE.BAS.ShaderChunk["animation_time"] = "float tDelay = aAnimation.x;\nfloat tDuration = aAnimation.y;\nfloat tTime = clamp(uTime - tDelay, 0.0, tDuration);\nfloat tProgress = ease(tTime, 0.0, 1.0, tDuration);\n";
+
+THREE.BAS.ShaderChunk["cubic_bezier"] = "vec3 cubicBezier(vec3 p0, vec3 c0, vec3 c1, vec3 p1, float t)\n{\n    vec3 tp;\n    float tn = 1.0 - t;\n\n    tp.xyz = tn * tn * tn * p0.xyz + 3.0 * tn * tn * t * c0.xyz + 3.0 * tn * t * t * c1.xyz + t * t * t * p1.xyz;\n\n    return tp;\n}\n";
+
+THREE.BAS.ShaderChunk["ease_in_cubic"] = "float ease(float t, float b, float c, float d) {\n  return c*(t/=d)*t*t + b;\n}\n";
+
+THREE.BAS.ShaderChunk["ease_in_quad"] = "float ease(float t, float b, float c, float d) {\n  return c*(t/=d)*t + b;\n}\n";
+
+THREE.BAS.ShaderChunk["ease_out_cubic"] = "float ease(float t, float b, float c, float d) {\n  return c*((t=t/d - 1.0)*t*t + 1.0) + b;\n}\n";
+
+THREE.BAS.ShaderChunk["quaternion_rotation"] = "vec3 rotateVector(vec4 q, vec3 v)\n{\n    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);\n}\n\nvec4 quatFromAxisAngle(vec3 axis, float angle)\n{\n    float halfAngle = angle * 0.5;\n    return vec4(axis.xyz * sin(halfAngle), cos(halfAngle));\n}\n";
+
+
+THREE.BAS.PrefabBufferGeometry = function (prefab, count) {
+  THREE.BufferGeometry.call(this);
+
+  this.prefabGeometry = prefab;
+  this.prefabCount = count;
+  this.prefabVertexCount = prefab.vertices.length;
+
+  this.bufferDefaults();
+};
+THREE.BAS.PrefabBufferGeometry.prototype = Object.create(THREE.BufferGeometry.prototype);
+THREE.BAS.PrefabBufferGeometry.prototype.constructor = THREE.BAS.PrefabBufferGeometry;
+
+THREE.BAS.PrefabBufferGeometry.prototype.bufferDefaults = function () {
+  var prefabFaceCount = this.prefabGeometry.faces.length;
+  var prefabIndexCount = this.prefabGeometry.faces.length * 3;
+  var prefabVertexCount = this.prefabVertexCount = this.prefabGeometry.vertices.length;
+  var prefabIndices = [];
+
+  //console.log('prefabCount', this.prefabCount);
+  //console.log('prefabFaceCount', prefabFaceCount);
+  //console.log('prefabIndexCount', prefabIndexCount);
+  //console.log('prefabVertexCount', prefabVertexCount);
+  //console.log('triangles', prefabFaceCount * this.prefabCount);
+
+  for (var h = 0; h < prefabFaceCount; h++) {
+    var face = this.prefabGeometry.faces[h];
+    prefabIndices.push(face.a, face.b, face.c);
+  }
+
+  var indexBuffer = new Uint32Array(this.prefabCount * prefabIndexCount);
+  var positionBuffer = new Float32Array(this.prefabCount * prefabVertexCount * 3);
+
+  this.setIndex(new THREE.BufferAttribute(indexBuffer, 1));
+  this.setAttribute('position', new THREE.BufferAttribute(positionBuffer, 3));
+
+  for (var i = 0, offset = 0; i < this.prefabCount; i++) {
+    for (var j = 0; j < prefabVertexCount; j++, offset += 3) {
+      var prefabVertex = this.prefabGeometry.vertices[j];
+
+      positionBuffer[offset    ] = prefabVertex.x;
+      positionBuffer[offset + 1] = prefabVertex.y;
+      positionBuffer[offset + 2] = prefabVertex.z;
+    }
+
+    for (var k = 0; k < prefabIndexCount; k++) {
+      indexBuffer[i * prefabIndexCount + k] = prefabIndices[k] + i * prefabVertexCount;
+    }
+  }
+};
+
+// todo test
+THREE.BAS.PrefabBufferGeometry.prototype.bufferUvs = function() {
+  var prefabFaceCount = this.prefabGeometry.faces.length;
+  var prefabVertexCount = this.prefabVertexCount = this.prefabGeometry.vertices.length;
+  var prefabUvs = [];
+
+  for (var h = 0; h < prefabFaceCount; h++) {
+    var face = this.prefabGeometry.faces[h];
+    var uv = this.prefabGeometry.faceVertexUvs[0][h];
+
+    prefabUvs[face.a] = uv[0];
+    prefabUvs[face.b] = uv[1];
+    prefabUvs[face.c] = uv[2];
+  }
+
+  var uvBuffer = this.createAttribute('uv', 2);
+
+  for (var i = 0, offset = 0; i < this.prefabCount; i++) {
+    for (var j = 0; j < prefabVertexCount; j++, offset += 2) {
+      var prefabUv = prefabUvs[j];
+
+      uvBuffer.array[offset] = prefabUv.x;
+      uvBuffer.array[offset + 1] = prefabUv.y;
+    }
+  }
+};
+
+/**
+ * based on BufferGeometry.computeVertexNormals
+ * calculate vertex normals for a prefab, and repeat the data in the normal buffer
+ */
+THREE.BAS.PrefabBufferGeometry.prototype.computeVertexNormals = function () {
+  var index = this.index;
+  var attributes = this.attributes;
+  var positions = attributes.position.array;
+
+  if (attributes.normal === undefined) {
+    this.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(positions.length), 3));
+  }
+
+  var normals = attributes.normal.array;
+
+  var vA, vB, vC,
+
+  pA = new THREE.Vector3(),
+  pB = new THREE.Vector3(),
+  pC = new THREE.Vector3(),
+
+  cb = new THREE.Vector3(),
+  ab = new THREE.Vector3();
+
+  var indices = index.array;
+  var prefabIndexCount = this.prefabGeometry.faces.length * 3;
+
+  for (var i = 0; i < prefabIndexCount; i += 3) {
+    vA = indices[i + 0] * 3;
+    vB = indices[i + 1] * 3;
+    vC = indices[i + 2] * 3;
+
+    pA.fromArray(positions, vA);
+    pB.fromArray(positions, vB);
+    pC.fromArray(positions, vC);
+
+    cb.subVectors(pC, pB);
+    ab.subVectors(pA, pB);
+    cb.cross(ab);
+
+    normals[vA] += cb.x;
+    normals[vA + 1] += cb.y;
+    normals[vA + 2] += cb.z;
+
+    normals[vB] += cb.x;
+    normals[vB + 1] += cb.y;
+    normals[vB + 2] += cb.z;
+
+    normals[vC] += cb.x;
+    normals[vC + 1] += cb.y;
+    normals[vC + 2] += cb.z;
+  }
+
+  for (var j = 1; j < this.prefabCount; j++) {
+    for (var k = 0; k < prefabIndexCount; k++) {
+      normals[j * prefabIndexCount + k] = normals[k];
+    }
+  }
+
+  this.normalizeNormals();
+
+  attributes.normal.needsUpdate = true;
+};
+
+THREE.BAS.PrefabBufferGeometry.prototype.createAttribute = function (name, itemSize) {
+  var buffer = new Float32Array(this.prefabCount * this.prefabVertexCount * itemSize);
+  var attribute = new THREE.BufferAttribute(buffer, itemSize);
+
+  this.setAttribute(name, attribute);
+
+  return attribute;
+};
+
+THREE.BAS.PrefabBufferGeometry.prototype.setAttribute4 = function (name, data) {
+  var offset = 0;
+  var array = this.geometry.attributes[name].array;
+  var i, j;
+
+  for (i = 0; i < data.length; i++) {
+    var v = data[i];
+
+    for (j = 0; j < this.prefabVertexCount; j++) {
+      array[offset++] = v.x;
+      array[offset++] = v.y;
+      array[offset++] = v.z;
+      array[offset++] = v.w;
+    }
+  }
+
+  this.geometry.attributes[name].needsUpdate = true;
+};
+THREE.BAS.PrefabBufferGeometry.prototype.setAttribute3 = function (name, data) {
+  var offset = 0;
+  var array = this.geometry.attributes[name].array;
+  var i, j;
+
+  for (i = 0; i < data.length; i++) {
+    var v = data[i];
+
+    for (j = 0; j < this.prefabVertexCount; j++) {
+      array[offset++] = v.x;
+      array[offset++] = v.y;
+      array[offset++] = v.z;
+    }
+  }
+
+  this.geometry.attributes[name].needsUpdate = true;
+};
+THREE.BAS.PrefabBufferGeometry.prototype.setAttribute2 = function (name, data) {
+  var offset = 0;
+  var array = this.geometry.attributes[name].array;
+  var i, j;
+
+  for (i = 0; i < this.prefabCount; i++) {
+    var v = data[i];
+
+    for (j = 0; j < this.prefabVertexCount; j++) {
+      array[offset++] = v.x;
+      array[offset++] = v.y;
+    }
+  }
+
+  this.geometry.attributes[name].needsUpdate = true;
+};
+
+THREE.BAS.BaseAnimationMaterial = function(parameters) {
+    THREE.ShaderMaterial.call(this);
+
+    this.shaderFunctions = [];
+    this.shaderParameters = [];
+    this.shaderVertexInit = [];
+    this.shaderTransformNormal = [];
+    this.shaderTransformPosition = [];
+
+    this.setValues(parameters);
+};
+THREE.BAS.BaseAnimationMaterial.prototype = Object.create(THREE.ShaderMaterial.prototype);
+THREE.BAS.BaseAnimationMaterial.prototype.constructor = THREE.BAS.BaseAnimationMaterial;
+
+// abstract
+THREE.BAS.BaseAnimationMaterial.prototype._concatVertexShader = function() {
+    return '';
+};
+
+THREE.BAS.BaseAnimationMaterial.prototype._concatFunctions = function() {
+    return this.shaderFunctions.join('\n');
+};
+THREE.BAS.BaseAnimationMaterial.prototype._concatParameters = function() {
+    return this.shaderParameters.join('\n');
+};
+THREE.BAS.BaseAnimationMaterial.prototype._concatVertexInit = function() {
+    return this.shaderVertexInit.join('\n');
+};
+THREE.BAS.BaseAnimationMaterial.prototype._concatTransformNormal = function() {
+    return this.shaderTransformNormal.join('\n');
+};
+THREE.BAS.BaseAnimationMaterial.prototype._concatTransformPosition = function() {
+    return this.shaderTransformPosition.join('\n');
+};
+
+
+THREE.BAS.BaseAnimationMaterial.prototype.setUniformValues = function(values) {
+    for (var key in values) {
+        if (key in this.uniforms) {
+            var uniform = this.uniforms[key];
+            var value = values[key];
+
+            // todo add matrix uniform types
+            switch (uniform.type) {
+                case 'c': // color
+                    uniform.value.set(value);
+                    break;
+                case 'v2': // vectors
+                case 'v3':
+                case 'v4':
+                    uniform.value.copy(value);
+                    break;
+                case 'f': // float
+                case 't': // texture
+                    uniform.value = value;
+            }
+        }
+    }
+};
+
+THREE.BAS.PhongAnimationMaterial = function(parameters, uniformValues) {
+    THREE.BAS.BaseAnimationMaterial.call(this, parameters);
+
+    var phongShader = THREE.ShaderLib['phong'];
+
+    this.uniforms = THREE.UniformsUtils.merge([phongShader.uniforms, this.uniforms]);
+    this.lights = true;
+    this.vertexShader = this._concatVertexShader();
+    this.fragmentShader = phongShader.fragmentShader;
+
+    // todo add missing default defines
+    uniformValues.map && (this.defines['USE_MAP'] = '');
+    uniformValues.normalMap && (this.defines['USE_NORMALMAP'] = '');
+
+    this.setUniformValues(uniformValues);
+};
+THREE.BAS.PhongAnimationMaterial.prototype = Object.create(THREE.BAS.BaseAnimationMaterial.prototype);
+THREE.BAS.PhongAnimationMaterial.prototype.constructor = THREE.BAS.PhongAnimationMaterial;
+
+THREE.BAS.PhongAnimationMaterial.prototype._concatVertexShader = function() {
+    // based on THREE.ShaderLib.phong
+    return [
+        "#define PHONG",
+
+        "varying vec3 vViewPosition;",
+
+        "#ifndef FLAT_SHADED",
+
+        "	varying vec3 vNormal;",
+
+        "#endif",
+
+        THREE.ShaderChunk[ "common" ],
+        THREE.ShaderChunk[ "uv_pars_vertex" ],
+        THREE.ShaderChunk[ "uv2_pars_vertex" ],
+        THREE.ShaderChunk[ "displacementmap_pars_vertex" ],
+        THREE.ShaderChunk[ "envmap_pars_vertex" ],
+        THREE.ShaderChunk[ "lights_phong_pars_vertex" ],
+        THREE.ShaderChunk[ "color_pars_vertex" ],
+        THREE.ShaderChunk[ "morphtarget_pars_vertex" ],
+        THREE.ShaderChunk[ "skinning_pars_vertex" ],
+        THREE.ShaderChunk[ "shadowmap_pars_vertex" ],
+        THREE.ShaderChunk[ "logdepthbuf_pars_vertex" ],
+
+        this._concatFunctions(),
+
+        this._concatParameters(),
+
+        "void main() {",
+
+        this._concatVertexInit(),
+
+        THREE.ShaderChunk[ "uv_vertex" ],
+        THREE.ShaderChunk[ "uv2_vertex" ],
+        THREE.ShaderChunk[ "color_vertex" ],
+        THREE.ShaderChunk[ "beginnormal_vertex" ],
+
+        this._concatTransformNormal(),
+
+        THREE.ShaderChunk[ "morphnormal_vertex" ],
+        THREE.ShaderChunk[ "skinbase_vertex" ],
+        THREE.ShaderChunk[ "skinnormal_vertex" ],
+        THREE.ShaderChunk[ "defaultnormal_vertex" ],
+
+        "#ifndef FLAT_SHADED", // Normal computed with derivatives when FLAT_SHADED
+
+        "	vNormal = normalize( transformedNormal );",
+
+        "#endif",
+
+        THREE.ShaderChunk[ "begin_vertex" ],
+
+        this._concatTransformPosition(),
+
+        THREE.ShaderChunk[ "displacementmap_vertex" ],
+        THREE.ShaderChunk[ "morphtarget_vertex" ],
+        THREE.ShaderChunk[ "skinning_vertex" ],
+        THREE.ShaderChunk[ "project_vertex" ],
+        THREE.ShaderChunk[ "logdepthbuf_vertex" ],
+
+        "	vViewPosition = - mvPosition.xyz;",
+
+        THREE.ShaderChunk[ "worldpos_vertex" ],
+        THREE.ShaderChunk[ "envmap_vertex" ],
+        THREE.ShaderChunk[ "lights_phong_vertex" ],
+        THREE.ShaderChunk[ "shadowmap_vertex" ],
+
+        "}"
+
+    ].join( "\n" );
+};
+
+</script>
+
+<script>
+  
+  function initScene() {
+  
+  container = document.querySelector("#scene-container");
+  scene = new THREE.Scene();
+  
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(window.devicePixelRatio > 1.5 ? 1.65 : 1.1);
+  
+  renderer.physicallyCorrectLights = true;
+  container.appendChild(renderer.domElement);
+  
+  camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 20, 180);
+  // camera.target.set(0, 10, 0); 
+    
+  const cameraZ = isLandscape ? 180 : (200 / windowRatio);
+  camera.position.set(0, 20, cameraZ);
+  // camera.lookAt(0, 0, 0);
+  scene.add(camera);
+  
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+  dirLight.position.set(0, 250, -200);
+  
+  const dirLight2 = new THREE.DirectionalLight(0xffffff, 1.25);
+  dirLight2.position.set(100, 0, 100);
+  
+  const pointLight = new THREE.PointLight(0xe504e5, 200, 300, 1);
+  pointLight.position.set(10, 30, 80);
+  
+  const pointLight2 = new THREE.PointLight(0xffffff, 50, 100, 1);
+  pointLight2.position.set(0, 25, -200);
+  
+  const hemLight = new THREE.HemisphereLight( 0xffffbb, 0x080820, 3 );
+
+  scene.add(dirLight, dirLight2, pointLight, hemLight);
+  
+  // controls = new THREE.OrbitControls(camera, container);
+  // controls.target.set(0, 15, 0);
+  // controls.update();
+  
+}
+</script>
+
+<script>
+  
+function initMaterials() {
+
+  const purple = new THREE.MeshStandardMaterial({
+    color: 0xff00ff,
+    roughness: 0.4,
+    metalness: 0.9,
+    side: THREE.DoubleSide
+  });
+  purple.color.convertSRGBToLinear();
+  
+  const white = new THREE.MeshStandardMaterial({
+      color: 0xeaeaea,
+		  roughness: 0.7,
+			metalness: 0.2,
+			flatShading: false,
+      side: THREE.DoubleSide
+	});
+  white.color.convertSRGBToLinear();
+  
+  // disco reflections  
+  const loader = new THREE.CubeTextureLoader();
+  loader.setCrossOrigin('');
+  loader.setPath('https://s3-us-west-2.amazonaws.com/s.cdpn.io/911157/');
+ 
+  const textureCube = loader.load([
+    
+    'pisa1_pz.jpg', 'pisa1_ny.jpg',
+	  'pisa1_px.jpg', 'pisa1_nx.jpg',
+	  'pisa1_pz.jpg', 'pisa1_ny.jpg'
+    
+  ]);
+  
+  const disco = new THREE.MeshPhongMaterial({
+    color: 0xf9adff,
+    envMap: textureCube,
+    emissive: 0xf9adff,
+    flatShading: true
+  });
+  
+  const textureLoader = new THREE.TextureLoader(loadingManager);
+  const matcapTex = textureLoader.load(matcapURL);
+
+  const silver = new THREE.ShaderMaterial({
+    transparent: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      tMatCap: {
+        type: "t",
+        value: matcapTex
+      }
+    },
+    vertexShader: document.querySelector("#vs-matcap").textContent,
+    fragmentShader: document.querySelector("#fs-matcap").textContent,
+    flatShading: false
+  });
+  
+  const shinyBeigeTex = textureLoader.load(matcapShinyBeigeURL);
+  const shinyBeige = new THREE.ShaderMaterial({
+    transparent: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      tMatCap: {
+        type: "t",
+        value: shinyBeigeTex
+      }
+    },
+    vertexShader: document.querySelector("#vs-matcap").textContent,
+    fragmentShader: document.querySelector("#fs-matcap").textContent,
+    flatShading: false
+  });
+
+  const shinyPowderTex = textureLoader.load(matcapShinyPowderURL);
+  const shinyPowder = new THREE.ShaderMaterial({
+    transparent: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      tMatCap: {
+        type: "t",
+        value: shinyPowderTex
+      }
+    },
+    vertexShader: document.querySelector("#vs-matcap").textContent,
+    fragmentShader: document.querySelector("#fs-matcap").textContent,
+    flatShading: false
+  });
+
+  const iShiny = new THREE.ShaderMaterial({
+    transparent: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      tMatCap: {
+        type: "t",
+        value: shinyBeigeTex
+      }
+    },
+    vertexShader: document.querySelector("#vs-iMatcap").textContent,
+    fragmentShader: document.querySelector("#fs-iMatcap").textContent,
+    flatShading: false
+    
+  });
+  
+  let glow = new THREE.ShaderMaterial( 
+	{
+	    uniforms: 
+		{ 
+			"c":   { type: "f", value: 0.9 },
+			"p":   { type: "f", value: 1.5 },
+			glowColor: { type: "c", value: new THREE.Color(0xf2c398) },
+			viewVector: { type: "v3", value: camera.position }
+		},
+		vertexShader:   document.getElementById('vs-glow').textContent,
+		fragmentShader: document.getElementById('fs-glow').textContent,
+		side: THREE.FrontSide,
+		blending: THREE.AdditiveBlending,
+		transparent: true
+	});
+
+  return {
+    
+    white,
+    purple,
+    disco,
+    silver,
+    shinyBeige,
+    shinyPowder,
+    iShiny,
+    glow
+
+  };
+  
+}
+</script>
+<script>
+  
+  function initParticleSystem() {
+  
+  let prefabGeometry = new THREE.PlaneGeometry(0.7, 0.7);
+  let bufferGeometry = new THREE.BAS.PrefabBufferGeometry(prefabGeometry, mParticleCount);
+  bufferGeometry.computeVertexNormals();
+
+  // generate additional geometry data
+  let aOffset = bufferGeometry.createAttribute('aOffset', 1);
+  let aStartPosition = bufferGeometry.createAttribute('aStartPosition', 3);
+  let aControlPoint1 = bufferGeometry.createAttribute('aControlPoint1', 3);
+  let aControlPoint2 = bufferGeometry.createAttribute('aControlPoint2', 3);
+  let aEndPosition = bufferGeometry.createAttribute('aEndPosition', 3);
+  let aAxisAngle = bufferGeometry.createAttribute('aAxisAngle', 4);
+  let aColor = bufferGeometry.createAttribute('color', 3);
+
+  let i, j, offset;
+
+  // buffer time offset
+  let delay;
+
+  for (let i = 0, offset = 0; i < mParticleCount; i++) {
+    delay = i / mParticleCount * mDuration;
+
+    for (let j = 0; j < prefabGeometry.vertices.length; j++) {
+      aOffset.array[offset++] = delay;
+    }
+  }
+
+  // buffer start positions
+  let x, y, z;
+
+  for (let i = 0, offset = 0; i < mParticleCount; i++) {
+    x = -30;
+    y = -60;
+    z = 40;
+
+    for (let j = 0; j < prefabGeometry.vertices.length; j++) {
+      aStartPosition.array[offset++] = x;
+      aStartPosition.array[offset++] = y;
+      aStartPosition.array[offset++] = z;
+    }
+  }
+
+  // buffer control points
+
+  for (let i = 0, offset = 0; i < mParticleCount; i++) {
+    // x = THREE.Math.randFloat(-400, -350);
+    // y = THREE.Math.randFloat(100, 200);
+    // z = THREE.Math.randFloat(-300, -100);
+    
+    x = THREE.Math.randFloat(250, 300);
+    y = THREE.Math.randFloat(100, 200);
+    z = THREE.Math.randFloat(100, 300);
+
+    for (let j = 0; j < prefabGeometry.vertices.length; j++) {
+      aControlPoint1.array[offset++] = x;
+      aControlPoint1.array[offset++] = y;
+      aControlPoint1.array[offset++] = z;
+    }
+  }
+
+  for (let i = 0, offset = 0; i < mParticleCount; i++) {
+    // x = THREE.Math.randFloat(0, 300);
+    // y = THREE.Math.randFloat(-190, -180);
+    // z = THREE.Math.randFloat(-300, -350);
+
+    x = THREE.Math.randFloat(0, 100);
+    y = THREE.Math.randFloat(-190, -180);
+    z = THREE.Math.randFloat(-300, -350);
+
+    for (let j = 0; j < prefabGeometry.vertices.length; j++) {
+      aControlPoint2.array[offset++] = x;
+      aControlPoint2.array[offset++] = y;
+      aControlPoint2.array[offset++] = z;
+    }
+  }
+
+  // buffer end positions
+
+  for (let i = 0, offset = 0; i < mParticleCount; i++) {
+//     x = 150;
+//     y = 180;
+//     z = 100;
+    
+    x = -100;
+    y = 120;
+    z = -50;
+
+    for (let j = 0; j < prefabGeometry.vertices.length; j++) {
+      aEndPosition.array[offset++] = x;
+      aEndPosition.array[offset++] = y;
+      aEndPosition.array[offset++] = z;
+    }
+  }
+
+  // buffer axis angle
+  let axis = new THREE.Vector3();
+  let angle = 0;
+
+  for (let i = 0, offset = 0; i < mParticleCount; i++) {
+    axis.x = THREE.Math.randFloatSpread(2);
+    axis.y = THREE.Math.randFloatSpread(2);
+    axis.z = THREE.Math.randFloatSpread(2);
+    axis.normalize();
+
+    angle = Math.PI * THREE.Math.randInt(16, 32);
+
+    for (let j = 0; j < prefabGeometry.vertices.length; j++) {
+      aAxisAngle.array[offset++] = axis.x;
+      aAxisAngle.array[offset++] = axis.y;
+      aAxisAngle.array[offset++] = axis.z;
+      aAxisAngle.array[offset++] = angle;
+    }
+  }
+
+  // buffer color
+  let color = new THREE.Color();
+  let h, s, l;
+
+  for (let i = 0, offset = 0; i < mParticleCount; i++) {
+    h = 0.9;
+    s = THREE.Math.randFloat(0.0, 0.1);
+    l = THREE.Math.randFloat(0.7, 0.99);
+
+    color.setHSL(h, s, l);
+
+    for (let j = 0; j < prefabGeometry.vertices.length; j++) {
+      aColor.array[offset++] = color.r;
+      aColor.array[offset++] = color.g;
+      aColor.array[offset++] = color.b;
+    }
+  }
+
+
+  const material = new THREE.BAS.PhongAnimationMaterial(
+    // custom parameters & THREE.MeshPhongMaterial parameters
+    {
+      vertexColors: THREE.VertexColors,
+      flatShading: true,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uTime: {type: 'f', value: 0},
+        uDuration: {type: 'f', value: mDuration}
+      },
+      shaderFunctions: [
+        THREE.BAS.ShaderChunk['quaternion_rotation'],
+        THREE.BAS.ShaderChunk['cubic_bezier']
+      ],
+      shaderParameters: [
+        'uniform float uTime;',
+        'uniform float uDuration;',
+        'attribute float aOffset;',
+        'attribute vec3 aStartPosition;',
+        'attribute vec3 aControlPoint1;',
+        'attribute vec3 aControlPoint2;',
+        'attribute vec3 aEndPosition;',
+        'attribute vec4 aAxisAngle;'
+      ],
+      shaderVertexInit: [
+        'float tProgress = mod((uTime + aOffset), uDuration) / uDuration;',
+
+        'float angle = aAxisAngle.w * tProgress;',
+        'vec4 tQuat = quatFromAxisAngle(aAxisAngle.xyz, angle);'
+      ],
+      shaderTransformNormal: [
+        'objectNormal = rotateVector(tQuat, objectNormal);'
+      ],
+      shaderTransformPosition: [
+        'transformed = rotateVector(tQuat, transformed);',
+        'transformed += cubicBezier(aStartPosition, aControlPoint1, aControlPoint2, aEndPosition, tProgress);'
+      ]
+    },
+    // THREE.MeshPhongMaterial uniforms
+    {
+      specular: 0xffffff,
+      shininess: 10
+    }
+  );
+
+  mParticleSystem = new THREE.Mesh(bufferGeometry, material);
+  // because the bounding box of the particle system does not reflect its on-screen size
+  // set this to false to prevent the whole thing from disappearing on certain angles
+  mParticleSystem.frustumCulled = false;
+
+  mParticleSystem.position.y = -80; 
+    
+ mParticleSystem.scale.set(0.65, 0.1, 0.65);   scene.add(mParticleSystem);
+  
+}
+</script>
+<!-- partial -->
+  <script src='https://cdnjs.cloudflare.com/ajax/libs/gsap/3.5.0/gsap.min.js'></script><script  src="./script.js"></script>
+
+</body>
+</html>
